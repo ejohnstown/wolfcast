@@ -78,6 +78,8 @@
 
 #endif
 
+#include "wolfcast.h"
+
 
 static int seq_cb(word16 peerId, word32 maxSeq, word32 curSeq, void* ctx)
 {

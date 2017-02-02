@@ -1,6 +1,6 @@
 all: wolfcast
 
-wolfcast: wolfcast.c
+wolfcast: wolfcast.c wolfcast.h
 	gcc -Wall wolfcast.c -o ./wolfcast -lwolfssl
 
 clean:

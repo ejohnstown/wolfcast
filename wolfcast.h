@@ -1,11 +1,2 @@
-int
-WolfcastClient(
-    unsigned short myId,
-    const unsigned short *peerIdList,
-    unsigned int peerIdListSz);
-
-int
-WolfcastServer(
-    unsigned short myId,
-    const unsigned short *ignore1,
-    unsigned int ignore2);
+int WolfcastClient(unsigned short, const unsigned short *, unsigned int);
+int WolfcastServer(unsigned short, const unsigned short *, unsigned int);
