@@ -35,7 +35,6 @@
     #include <netdb.h>
     #include <netinet/in.h>
     #include <netinet/tcp.h>
-    #include <arpa/inet.h>
     #include <sys/ioctl.h>
     #include <time.h>
     #include <sys/types.h>
@@ -60,26 +59,12 @@
     #define GROUP_PORT 12345
 
 
-    typedef struct SocketInfo_t {
-        int txFd;
-        int rxFd;
-        struct sockaddr_in tx;
-        unsigned int txSz;
-        CallbackIOSend txCb;
-        CallbackIORecv rxCb;
-    } SocketInfo_t;
-
-
 static int
 CreateSockets(SocketInfo_t* si, int isClient)
 {
     int error = 0, on = 1, off = 0;
 
     if (si != NULL) {
-
-        /* Set to NULL for default callbacks. */
-        si->txCb = NULL;
-        si->rxCb = NULL;
 
         si->tx.sin_family = AF_INET;
         si->tx.sin_addr.s_addr = inet_addr(GROUP_ADDR);
@@ -122,18 +107,22 @@ CreateSockets(SocketInfo_t* si, int isClient)
         WCERR("no socket info");
     }
 
-    if (!error && isClient) {
+    if (isClient) {
         struct sockaddr_in rxAddr;
 
-        memset(&rxAddr, 0, sizeof(rxAddr));
-        rxAddr.sin_family = AF_INET;
-        rxAddr.sin_addr.s_addr = htonl(INADDR_ANY);
-        rxAddr.sin_port = htons(GROUP_PORT);
+        if (!error) {
+            memset(&rxAddr, 0, sizeof(rxAddr));
+            rxAddr.sin_family = AF_INET;
+            rxAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+            rxAddr.sin_port = htons(GROUP_PORT);
+        }
 
-        si->rxFd = socket(AF_INET, SOCK_DGRAM, 0);
-        if (si->rxFd < 0) {
-            error = 1;
-            WCERR("unable to create rx socket");
+        if (!error) {
+            si->rxFd = socket(AF_INET, SOCK_DGRAM, 0);
+            if (si->rxFd < 0) {
+                error = 1;
+                WCERR("unable to create rx socket");
+            }
         }
 
         if (!error) {
@@ -153,7 +142,9 @@ CreateSockets(SocketInfo_t* si, int isClient)
         }
 #endif
         if (!error) {
-            if (bind(si->rxFd, (struct sockaddr*)&rxAddr, sizeof(rxAddr)) != 0) {
+            if (bind(si->rxFd,
+                     (struct sockaddr*)&rxAddr, sizeof(rxAddr)) != 0) {
+
                 error = 1;
                 WCERR("rx bind failed");
             }
@@ -186,8 +177,6 @@ CreateSockets(SocketInfo_t* si, int isClient)
 
 #else /* NETX */
 
-    #include "nx_api.h"
-
     static unsigned int WCTIME(void)
     {
         return (unsigned int)bsp_fast_timer_uptime() / 1000000;
@@ -203,16 +192,6 @@ CreateSockets(SocketInfo_t* si, int isClient)
 
     #define GROUP_ADDR 0xE2000003
     #define GROUP_PORT 12345
-
-    typedef struct SocketInfo_t {
-        NX_IP *ip_ptr;
-        int txFd;
-        int rxFd;
-        unsigned int tx;
-        unsigned int txSz;
-        CallbackIOSend txCb;
-        CallbackIORecv rxCb;
-    } SocketInfo_t;
 
 
 static int
@@ -241,10 +220,6 @@ CreateSockets(SocketInfo_t* si, int isClient)
     int error = 0, on = 1, off = 0;
 
     if (si != NULL) {
-
-		/* Set the NetX callbacks. */
-		si->txCb = NetxDtlsTxCallback;
-		si->rxCb = NetxDtlsRxCallback;
 
         txAddr->sin_family = AF_INET;
         txAddr->sin_addr.s_addr = GROUP_ADDR;
@@ -358,27 +333,6 @@ CreateSockets(SocketInfo_t* si, int isClient)
 #endif
 
 
-/* Missing items:
- * inet_addr()
- * select()
- * AF_INET
- * htons()
- * struct sockaddr_in
- * socket()
- * SOCK_DGRAM
- * setsockopt
- * SO_REUSEADDR
- * IPPROTO_IP
- * IP_MULTICAST_LOOP
- * bind
- * IP_ADD_MEMBERSHIP
- * struct ip_mreq
- * fcntl()
- * O_NONBLOCK
- * struct timeval
- */
-
-
 static int
 SetFakeKey(WOLFSSL* ssl)
 {
@@ -401,9 +355,11 @@ SetFakeKey(WOLFSSL* ssl)
 }
 
 
+const char seqHwCbCtx[] = "Callback context string.";
+
 static int seq_cb(word16 peerId, word32 maxSeq, word32 curSeq, void* ctx)
 {
-    char* ctxStr = (char*)ctx;
+    const char* ctxStr = (const char*)ctx;
 
     WCPRINTF("Highwater Callback (%u:%u/%u): %s\n", peerId, curSeq, maxSeq,
           ctxStr != NULL ? ctxStr : "Forgot to set the callback context.");
@@ -421,73 +377,116 @@ static int seq_cb(word16 peerId, word32 maxSeq, word32 curSeq, void* ctx)
 #endif
 
 
-#ifndef NO_WOLFCAST_CLIENT
+#ifdef NETX
+    /* callback functions. */
+#endif
+
 
 int
-WolfcastClient(
-    unsigned short myId,
-    const unsigned short* peerIdList,
-    unsigned int peerIdListSz)
+WolfcastInit(
+        int isClient,
+        unsigned short myId,
+        unsigned short *peerIdList,
+        unsigned int peerIdListSz,
+        WOLFSSL_CTX **ctx,
+        WOLFSSL **ssl,
+        SocketInfo_t *si)
 {
     int ret, error = 0;
-    char seqHwCbCtx[] = "Callback context string.";
-    SocketInfo_t si;
-    WOLFSSL_CTX* ctx;
-    WOLFSSL* ssl;
-    unsigned int i;
 
-    error = CreateSockets(&si, 1);
-    if (error)
-        WCERR("Couldn't create sockets");
+    if (ctx == NULL || ssl == NULL || si == NULL ||
+        (isClient && (peerIdList == NULL || peerIdListSz == 0))) {
 
-    wolfSSL_Init();
+        error = 1;
+        WCERR("CreateSessions invalid parameters");
+    }
 
-#ifndef WOLFSSL_STATIC_MEMORY
-    if (!error)
-        ctx = wolfSSL_CTX_new(wolfDTLSv1_2_client_method());
-#else
-    ctx = NULL;
     if (!error) {
-        ret = wolfSSL_CTX_load_static_memory(
-                &ctx, wolfDTLSv1_2_client_method_ex,
-                memory, sizeof(memory), 0, 1);
+        ret = wolfSSL_Init();
         if (ret != SSL_SUCCESS) {
             error = 1;
-            WCERR("unable to load static memory and create ctx");
+            WCERR("couldn't initialize wolfSSL");
+        }
+    }
+
+    if (!error) {
+        error = CreateSockets(si, isClient);
+        if (error)
+            WCERR("couldn't create sockets");
+    }
+
+#ifndef WOLFSSL_STATIC_MEMORY
+    if (!error) {
+        WOLFSSL_METHOD *method = NULL;
+        *ctx = NULL;
+        if (isClient) {
+            method = wolfDTLSv1_2_client_method();
+        }
+        else {
+            method = wolfDTLSv1_2_server_method();
+        }
+
+        if (method != NULL)
+            *ctx = wolfSSL_CTX_new(method);
+
+        if (*ctx == NULL) {
+            error = 1;
+            WCERR("ctx new error");
+        }
+    }
+#else
+    if (!error) {
+        wolfSSL_method_func method = NULL;
+        *ctx = NULL;
+
+        if (isClient) {
+            method = wolfDTLSv1_2_client_method_ex;
+        }
+        else {
+            method = wolfDTLSv1_2_server_method_ex;
+        }
+
+        if (method != NULL) {
+            ret = wolfSSL_CTX_load_static_memory(
+                    ctx, wolfDTLSv1_2_server_method_ex,
+                    memory, sizeof(memory), 0, 1);
+
+            if (ret != SSL_SUCCESS) {
+                error = 1;
+                WCERR("unable to load static memory and create ctx");
+            }
         }
     }
 
     if (!error) {
         /* load in a buffer for IO */
         ret = wolfSSL_CTX_load_static_memory(
-                &ctx, NULL, memoryIO, sizeof(memoryIO),
+                ctx, NULL, memoryIO, sizeof(memoryIO),
                 WOLFMEM_IO_POOL_FIXED | WOLFMEM_TRACK_STATS, 1);
         if (ret != SSL_SUCCESS) {
             error = 1;
-            WCERR("unable to load static IO memory and create ctx");
+            WCERR("unable to load static IO memory to ctx");
         }
     }
 #endif
-    if (ctx == NULL) {
-        error = 1;
-        WCERR("ctx new error");
+
+#ifdef NETX
+    if (!error) {
+        wolfSSL_SetIOSend(*ctx, NetxDtlsTxCallback);
+        wolfSSL_SetIORecv(*ctx, NetxDtlsRxCallback);
     }
+#endif
 
     if (!error) {
-        if (si.txCb != NULL && si.rxCb != NULL) {
-            wolfSSL_SetIOSend(ctx, si.txCb);
-            wolfSSL_SetIORecv(ctx, si.rxCb);
-        }
-
-        ret = wolfSSL_CTX_mcast_set_member_id(ctx, myId);
+        ret = wolfSSL_CTX_mcast_set_member_id(*ctx, myId);
         if (ret != SSL_SUCCESS) {
             error = 1;
             WCERR("set mcast member id error");
         }
     }
 
-    if (!error) {
-        ret = wolfSSL_CTX_mcast_set_highwater_cb(ctx, 100, 10, 20, seq_cb);
+    if (!error && isClient) {
+        ret = wolfSSL_CTX_mcast_set_highwater_cb(*ctx, 100, 10, 20, seq_cb);
         if (ret != SSL_SUCCESS) {
             error = 1;
             WCERR("set mcast highwater cb error");
@@ -495,19 +494,16 @@ WolfcastClient(
     }
 
     if (!error) {
-        ssl = wolfSSL_new(ctx);
-        if (!ssl) {
+        *ssl = wolfSSL_new(*ctx);
+        if (*ssl == NULL) {
             error = 1;
             WCERR("ssl new error");
         }
     }
 
-    if (!error) {
-        #if 0
-        wolfSSL_SetIOWriteCtx(ssl, NULL);
-        wolfSSL_SetIOReadCtx(ssl, NULL);
-        #endif
-        ret = wolfSSL_set_read_fd(ssl, si.rxFd);
+#ifndef NETX
+    if (!error && isClient) {
+        ret = wolfSSL_set_read_fd(*ssl, si->rxFd);
         if (ret != SSL_SUCCESS) {
             error = 1;
             WCERR("set ssl read fd error");
@@ -515,7 +511,7 @@ WolfcastClient(
     }
 
     if (!error) {
-        ret = wolfSSL_set_write_fd(ssl, si.txFd);
+        ret = wolfSSL_set_write_fd(*ssl, si->txFd);
         if (ret != SSL_SUCCESS) {
             error = 1;
             WCERR("set ssl write fd error");
@@ -523,80 +519,115 @@ WolfcastClient(
     }
 
     if (!error) {
-        ret = wolfSSL_dtls_set_peer(ssl, &si.tx, si.txSz);
+        ret = wolfSSL_dtls_set_peer(*ssl, &si->tx, si->txSz);
         if (ret != SSL_SUCCESS) {
             error = 1;
             WCERR("set ssl sender error");
         }
     }
-
+#else
     if (!error) {
-        ret = wolfSSL_mcast_set_highwater_ctx(ssl, seqHwCbCtx);
-        if (ret != SSL_SUCCESS) {
-            error = 1;
-            WCERR("set highwater ctx error");
-        }
+        wolfSSL_SetIOWriteCtx(*ssl, &si);
+        wolfSSL_SetIOReadCtx(*ssl, &si);
     }
+#endif
 
-    if (!error) {
-        for (i = 0; i < peerIdListSz; i++) {
-            ret = wolfSSL_mcast_peer_add(ssl, peerIdList[i], 0);
+    if (isClient) {
+        if (!error) {
+            wolfSSL_set_using_nonblock(*ssl, 1);
+            ret = wolfSSL_mcast_set_highwater_ctx(*ssl, (void*)seqHwCbCtx);
             if (ret != SSL_SUCCESS) {
                 error = 1;
-                WCERR("mcast add peer error");
-                break;
+                WCERR("set highwater ctx error");
+            }
+        }
+
+        if (!error) {
+            int i;
+            for (i = 0; i < peerIdListSz; i++) {
+                ret = wolfSSL_mcast_peer_add(*ssl, peerIdList[i], 0);
+                if (ret != SSL_SUCCESS) {
+                    error = 1;
+                    WCERR("mcast add peer error");
+                    break;
+                }
             }
         }
     }
 
-    if (!error) {
-        wolfSSL_set_using_nonblock(ssl, 1);
-        error = SetFakeKey(ssl);
+    if (!error)
+        error = SetFakeKey(*ssl);
+
+    return error;
+}
+
+
+#ifndef NO_WOLFCAST_CLIENT
+
+static inline unsigned int
+WolfcastClientUpdateTimeout(unsigned int curTime)
+{
+    return curTime + 3;
+}
+
+
+int
+WolfcastClientInit(unsigned int *txtime, unsigned int *count)
+{
+    int error = 0;
+    if (txtime != NULL && count != NULL) {
+        *txtime = WolfcastClientUpdateTimeout(WCTIME());
+        *count = 0;
+    }
+    else
+        error = 1;
+    return error;
+}
+
+int
+WolfcastClient(WOLFSSL *ssl, unsigned short myId,
+               unsigned int *txtime, unsigned int *count)
+{
+    int error = 0;
+    char msg[MSG_SIZE];
+
+    if (ssl == NULL || txtime == NULL || count == NULL) {
+        error = 1;
+        WCERR("WolfcastClient bad parameters");
     }
 
     if (!error) {
-        unsigned int txtime = WCTIME() + 3;
-        i = 0;
-
-        for (;;) {
-            char msg[MSG_SIZE];
-            fd_set readfds;
-            struct timeval timeout = {0, 500000};
-            unsigned short peerId;
-
-            FD_ZERO(&readfds);
-            FD_SET(si.rxFd, &readfds);
-            ret = select(si.rxFd+1, &readfds, NULL, NULL, &timeout);
-            if (ret < 0) WCERR("main select failed");
-
-            if (FD_ISSET(si.rxFd, &readfds)) {
-                ssize_t n = wolfSSL_mcast_read(ssl, &peerId, msg, MSG_SIZE);
-                if (n < 0) {
-                    n = wolfSSL_get_error(ssl, n);
-                    if (n != SSL_ERROR_WANT_READ) {
-                        error = 1;
-                        WCERR(wolfSSL_ERR_reason_error_string(n));
-                        break;
-                    }
-                }
-                else
-                    printf("got msg from peer %u %s\n", peerId, msg);
+        unsigned short peerId;
+        ssize_t n = wolfSSL_mcast_read(ssl, &peerId, msg, MSG_SIZE);
+        if (n < 0) {
+            n = wolfSSL_get_error(ssl, n);
+            if (n != SSL_ERROR_WANT_READ) {
+                error = 1;
+                WCERR(wolfSSL_ERR_reason_error_string(n));
             }
+        }
+        else
+            printf("got msg from peer %u %s\n", peerId, msg);
+    }
 
-            unsigned int rxtime = WCTIME();
-            if (rxtime >= txtime) {
-                sprintf(msg, "%u sending message %d", myId, i++);
-                size_t msg_len = strlen(msg) + 1;
-                int n = wolfSSL_write(ssl, msg, (unsigned int)msg_len);
-                if (n < 0) {
-                    error = 1;
-                    n = wolfSSL_get_error(ssl, n);
-                    WCERR(wolfSSL_ERR_reason_error_string(n));
-                    break;
-                }
+    if (!error) {
+        unsigned int rxtime;
 
-                txtime = rxtime + 3;
+        rxtime = WCTIME();
+        if (rxtime >= *txtime) {
+            size_t msg_len;
+            int n;
+
+            sprintf(msg, "%u sending message %d", myId, *count++);
+            msg_len= strlen(msg) + 1;
+            n = wolfSSL_write(ssl, msg, (unsigned int)msg_len);
+            if (n < 0) {
+                error = 1;
+                n = wolfSSL_get_error(ssl, n);
+                WCERR(wolfSSL_ERR_reason_error_string(n));
             }
+            else
+                *txtime = WolfcastClientUpdateTimeout(rxtime);
         }
     }
 
@@ -609,110 +640,28 @@ WolfcastClient(
 #ifndef NO_WOLFCAST_SERVER
 
 int
-WolfcastServer(unsigned short myId,
-    const unsigned short* ignore1,
-    unsigned int ignore2)
+WolfcastServer(WOLFSSL *ssl)
 {
-    int error, ret;
-    SocketInfo_t si;
-    WOLFSSL_CTX* ctx;
-    WOLFSSL* ssl;
+    int error = 0;
 
-    (void)ignore1;
-    (void)ignore2;
-
-    wolfSSL_Init();
-
-    error = CreateSockets(&si, 0);
-    if (error)
-        WCERR("Couldn't create sockets");
-
-#ifndef WOLFSSL_STATIC_MEMORY
-    if (!error)
-        ctx = wolfSSL_CTX_new(wolfDTLSv1_2_server_method());
-#else
-    if (!error) {
-        ctx = NULL;
-        ret = wolfSSL_CTX_load_static_memory(
-                &ctx, wolfDTLSv1_2_server_method_ex,
-                memory, sizeof(memory), 0, 1);
-        if (ret != SSL_SUCCESS) {
-            error = 1;
-            WCERR("unable to load static memory and create ctx");
-        }
-    }
-
-    if (!error) {
-        /* load in a buffer for IO */
-        ret = wolfSSL_CTX_load_static_memory(
-                &ctx, NULL, memoryIO, sizeof(memoryIO),
-                WOLFMEM_IO_POOL_FIXED | WOLFMEM_TRACK_STATS, 1);
-        if (ret != SSL_SUCCESS) {
-            error = 1;
-            WCERR("unable to load static IO memory and create ctx");
-        }
-    }
-#endif
-    if (ctx == NULL) {
+    if (ssl == NULL) {
         error = 1;
-        WCERR("ctx new error");
+        WCERR("WolfcastServer bad parameters");
     }
 
     if (!error) {
-        ret = wolfSSL_CTX_mcast_set_member_id(ctx, myId);
-        if (ret != SSL_SUCCESS) {
+        unsigned int msg_len;
+        char msg[80];
+        int n;
+
+        sprintf(msg, "time is %us", WCTIME());
+        WCPRINTF("sending msg = %s\n", msg);
+        msg_len = (unsigned int)strlen(msg) + 1;
+        n = wolfSSL_write(ssl, msg, msg_len);
+        if (n < 0) {
             error = 1;
-            WCERR("set mcast member id error");
-        }
-    }
-
-    if (!error) {
-        ssl = wolfSSL_new(ctx);
-        if (!ssl) {
-            error = 1;
-            WCERR("ssl new error");
-        }
-    }
-
-    if (!error) {
-        #if 0
-        wolfSSL_SetIOWriteCtx(ssl, NULL);
-        wolfSSL_SetIOReadCtx(ssl, NULL);
-        #endif
-        ret = wolfSSL_set_write_fd(ssl, si.txFd);
-        if (ret != SSL_SUCCESS) {
-            error = 1;
-            WCERR("set ssl write fd error");
-        }
-    }
-
-    if (!error) {
-        ret = wolfSSL_dtls_set_peer(ssl, &si.tx, si.txSz);
-        if (ret != SSL_SUCCESS) {
-            error = 1;
-            WCERR("set ssl sender error");
-        }
-    }
-
-    if (!error)
-        error = SetFakeKey(ssl);
-
-    if (!error) {
-        for (;;) {
-            char msg[80];
-            unsigned int t = WCTIME();
-            sprintf(msg, "time is %us", t);
-            WCPRINTF("sending msg = %s\n", msg);
-            unsigned int msg_len = (unsigned int)strlen(msg) + 1;
-            int n = wolfSSL_write(ssl, msg, msg_len);
-            if (n < 0) {
-                error = 1;
-                n = wolfSSL_get_error(ssl, n);
-                WCERR(wolfSSL_ERR_reason_error_string(n));
-                break;
-            }
-
-            sleep(1);
+            n = wolfSSL_get_error(ssl, n);
+            WCERR(wolfSSL_ERR_reason_error_string(n));
         }
     }
 
@@ -735,7 +684,10 @@ main(
     int isClient = 0;
     unsigned short myId;
     unsigned short peerIdList[PEER_ID_LIST_SZ];
-    unsigned int peerIdListSz;
+    unsigned int peerIdListSz = 0;
+    SocketInfo_t si;
+    WOLFSSL_CTX *ctx = NULL;
+    WOLFSSL *ssl = NULL;
 
     if (argc == 3 || argc == 4) {
         long n;
@@ -769,7 +721,6 @@ main(
             char *str = argv[3];
             char *endptr = argv[3];
             
-            peerIdListSz = 0;
             do {
                 if (peerIdListSz == PEER_ID_LIST_SZ) {
                     error = 1;
@@ -800,21 +751,49 @@ main(
                  "       wolfcast server <id>\n");
     }
 
-    if (!error) {
-        if (isClient) {
+    
+    if (!error)
+        error = WolfcastInit(isClient, myId,
+                             peerIdList, peerIdListSz,
+                             &ctx, &ssl, &si);
+
+    if (isClient) {
 #ifndef NO_WOLFCAST_CLIENT
-            error = WolfcastClient(myId, peerIdList, peerIdListSz);
-#else
-            error = 1;
-#endif
+        unsigned int txtime, count;
+
+        if (!error)
+            error = WolfcastClientInit(&txtime, &count);
+
+        while (!error) {
+            int ret;
+            fd_set readfds;
+            struct timeval timeout = {0, 500000};
+
+            FD_ZERO(&readfds);
+            FD_SET(si.rxFd, &readfds);
+            ret = select(si.rxFd+1, &readfds, NULL, NULL, &timeout);
+            if (ret < 0) {
+                error = 1;
+                WCERR("main select failed");
+                break;
+            }
+
+            if (FD_ISSET(si.rxFd, &readfds))
+                error = WolfcastClient(ssl, myId, &txtime, &count);
         }
-        else {
+#else
+        error = 1;
+#endif
+    }
+    else {
 #ifndef NO_WOLFCAST_SERVER
-            error = WolfcastServer(myId, peerIdList, peerIdListSz);
-#else
-            error = 1;
-#endif
+        while (!error) {
+            error = WolfcastServer(ssl);
+            sleep(1);
         }
+#else
+        error = 1;
+#endif
     }
 
     return error;
