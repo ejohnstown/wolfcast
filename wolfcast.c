@@ -17,36 +17,15 @@
 
  */
 
+
 #include <wolfssl/options.h>
 #include <wolfssl/ssl.h>
 #include <wolfssl/error-ssl.h>
 #include <wolfssl/wolfcrypt/memory.h>
+#include "wolfcast.h"
 
 
-#define ANYIN_ADDR "0.0.0.0"
-#define GROUP_ADDR "226.0.0.3"
-#define GROUP_PORT  12345
-#define MSG_SIZE    80
-
-
-#ifdef NETX
-
-    #include "nx_api.h"
-
-    unsigned int WCTIME(void)
-    {
-        return (unsigned int)bsp_fast_timer_uptime() / 1000000;
-    }
-
-    #define WCPRINTF bsp_debug_printf
-
-    void WCERR(const char *msg)
-    {
-        if (msg != NULL)
-            bsp_debug_printf("error: %s\n", msg);
-    }
-
-#else /* Darwin or Linux */
+#ifndef NETX
 
     #include <stdlib.h>
     #include <stdio.h>
@@ -64,60 +43,212 @@
     #include <sys/select.h>
     #include <fcntl.h>
 
-    unsigned int WCTIME(void)
+    static unsigned int WCTIME(void)
     {
         return (unsigned int)time(NULL);
     }
 
     #define WCPRINTF printf
 
-    void WCERR(const char *msg) {
+    static void WCERR(const char *msg)
+    {
         if (msg != NULL)
             fprintf(stderr, "error: %s\n", msg);
     }
 
-#endif
+    #define GROUP_ADDR "226.0.0.3"
+    #define GROUP_PORT 12345
 
-#include "wolfcast.h"
+
+    typedef struct SocketInfo_t {
+        int txFd;
+        int rxFd;
+        struct sockaddr_in tx;
+        unsigned int txSz;
+        CallbackIOSend txCb;
+        CallbackIORecv rxCb;
+    } SocketInfo_t;
 
 
-static int seq_cb(word16 peerId, word32 maxSeq, word32 curSeq, void* ctx)
+static int
+CreateSockets(SocketInfo_t* si, int isClient)
 {
-    char* ctxStr = (char*)ctx;
+    int error = 0, on = 1, off = 0;
 
-    WCPRINTF("Highwater Callback (%u:%u/%u): %s\n", peerId, curSeq, maxSeq,
-          ctxStr != NULL ? ctxStr : "Forgot to set the callback context.");
+    if (si != NULL) {
 
-    return 0;
+        /* Set to NULL for default callbacks. */
+        si->txCb = NULL;
+        si->rxCb = NULL;
+
+        si->tx.sin_family = AF_INET;
+        si->tx.sin_addr.s_addr = inet_addr(GROUP_ADDR);
+        si->tx.sin_port = htons(GROUP_PORT);
+        si->txSz = sizeof(si->tx);
+
+        si->txFd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (si->txFd < 0) {
+            error = 1;
+            WCERR("unable to create tx socket");
+        }
+
+        if (!error) {
+            if (setsockopt(si->txFd, SOL_SOCKET, SO_REUSEADDR,
+                           &on, sizeof(on)) != 0) {
+                error = 1;
+                WCERR("couldn't set tx reuse addr");
+            }
+        }
+#ifdef SO_REUSEPORT
+        if (!error) {
+            if (setsockopt(si->txFd, SOL_SOCKET, SO_REUSEPORT,
+                           &on, sizeof(on)) != 0) {
+                error = 1;
+                WCERR("couldn't set tx reuse port");
+            }
+        }
+#endif
+        if (!error && isClient) {
+            /* don't send to self */
+            if (setsockopt(si->txFd, IPPROTO_IP, IP_MULTICAST_LOOP,
+                           &off, sizeof(off)) != 0) {
+                error = 1;
+                WCERR("couldn't disable multicast loopback");
+            }
+        }
+    }
+    else {
+        error = 1;
+        WCERR("no socket info");
+    }
+
+    if (!error && isClient) {
+        struct sockaddr_in rxAddr;
+
+        memset(&rxAddr, 0, sizeof(rxAddr));
+        rxAddr.sin_family = AF_INET;
+        rxAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+        rxAddr.sin_port = htons(GROUP_PORT);
+
+        si->rxFd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (si->rxFd < 0) {
+            error = 1;
+            WCERR("unable to create rx socket");
+        }
+
+        if (!error) {
+            if (setsockopt(si->rxFd, SOL_SOCKET, SO_REUSEADDR,
+                           &on, (unsigned int)sizeof(on)) != 0) {
+                error = 1;
+                WCERR("couldn't set rx reuse addr");
+            }
+        }
+#ifdef SO_REUSEPORT
+        if (!error) {
+            if (setsockopt(si->rxFd, SOL_SOCKET, SO_REUSEPORT,
+                           &on, (unsigned int)sizeof(on)) != 0) {
+                error = 1;
+                WCERR("couldn't set rx reuse port");
+            }
+        }
+#endif
+        if (!error) {
+            if (bind(si->rxFd, (struct sockaddr*)&rxAddr, sizeof(rxAddr)) != 0) {
+                error = 1;
+                WCERR("rx bind failed");
+            }
+        }
+
+        if (!error) {
+            struct ip_mreq imreq;
+            memset(&imreq, 0, sizeof(imreq));
+
+            imreq.imr_multiaddr.s_addr = inet_addr(GROUP_ADDR);
+            imreq.imr_interface.s_addr = htonl(INADDR_ANY);
+
+            if (setsockopt(si->rxFd, IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                           (const void*)&imreq, sizeof(imreq)) != 0) {
+                error = 1;
+                WCERR("setsockopt mc add membership failed");
+            }
+        }
+
+        if (!error) {
+            if (fcntl(si->rxFd, F_SETFL, O_NONBLOCK) == -1) {
+                error = 1;
+                WCERR("set nonblock failed");
+            }
+        }
+    }
+
+    return error;
 }
 
+#else /* NETX */
 
-typedef int SOCKET_T;
+    #include "nx_api.h"
+
+    static unsigned int WCTIME(void)
+    {
+        return (unsigned int)bsp_fast_timer_uptime() / 1000000;
+    }
+
+    #define WCPRINTF bsp_debug_printf
+
+    static void WCERR(const char *msg)
+    {
+        if (msg != NULL)
+            bsp_debug_printf("error: %s\n", msg);
+    }
+
+    #define GROUP_ADDR 0xE2000003
+    #define GROUP_PORT 12345
+
+    typedef struct SocketInfo_t {
+        NX_IP *ip_ptr;
+        int txFd;
+        int rxFd;
+        unsigned int tx;
+        unsigned int txSz;
+        CallbackIOSend txCb;
+        CallbackIORecv rxCb;
+    } SocketInfo_t;
 
 
-static void
-MakeSockaddr(
-    struct sockaddr_in* sa, socklen_t saSz,
-    const char *addr, unsigned short port)
+static int
+NetxDtlsTxCallback(
+    WOLFSSL *ssl,
+    char *buf, int sz,
+    void *ctx)
 {
-    memset(sa, 0, saSz);
-    sa->sin_family = AF_INET;
-    sa->sin_addr.s_addr = inet_addr(addr);
-    sa->sin_port = htons(port);
+	return 0;
 }
 
 
 static int
-CreateSockets(
-    SOCKET_T *txFd, struct sockaddr_in* txAddr, socklen_t txAddrSz,
-    SOCKET_T *rxFd, struct sockaddr_in* rxAddr, socklen_t rxAddrSz,
-    const char *txIp, const char *rxIp, unsigned short port)
+NetxDtlsRxCallback(
+    WOLFSSL *ssl,
+    char *buf, int sz,
+    void *ctx)
+{
+	return 0;
+}
+
+
+static int
+CreateSockets(SocketInfo_t* si, int isClient)
 {
     int error = 0, on = 1, off = 0;
 
-    if (txFd != NULL && txAddr != NULL && txAddrSz != 0 && txIp != NULL) {
+    if (si != NULL) {
 
-        MakeSockaddr(txAddr, txAddrSz, txIp, port);
+		/* Set the NetX callbacks. */
+		si->txCb = NetxDtlsTxCallback;
+		si->rxCb = NetxDtlsRxCallback;
+
+        txAddr->sin_family = AF_INET;
+        txAddr->sin_addr.s_addr = GROUP_ADDR;
+        txAddr->sin_port = GROUP_PORT;
 
         *txFd = socket(AF_INET, SOCK_DGRAM, 0);
         if (*txFd < 0) {
@@ -127,20 +258,20 @@ CreateSockets(
 
         if (!error) {
             if (setsockopt(*txFd, SOL_SOCKET, SO_REUSEADDR,
-                           &on, (socklen_t)sizeof(on)) != 0) {
+                           &on, (unsigned int)sizeof(on)) != 0) {
                 error = 1;
                 WCERR("couldn't set tx reuse addr");
             }
         }
-#ifdef SO_REUSEPORT
+
         if (!error) {
             if (setsockopt(*txFd, SOL_SOCKET, SO_REUSEPORT,
-                           &on, (socklen_t)sizeof(on)) != 0) {
+                           &on, (unsigned int)sizeof(on)) != 0) {
                 error = 1;
                 WCERR("couldn't set tx reuse port");
             }
         }
-#endif
+
         if (!error && rxFd != NULL) {
             /* don't send to self */
             if (setsockopt(*txFd, IPPROTO_IP, IP_MULTICAST_LOOP,
@@ -152,13 +283,17 @@ CreateSockets(
     }
     else {
         error = 1;
-        WCERR("no transmit socket provided");
+		WCERR("no socket info");
     }
 
     if (!error && rxFd != NULL && rxIp != NULL) {
 
-        if (rxAddr != NULL && rxAddrSz != 0)
-            MakeSockaddr(rxAddr, rxAddrSz, rxIp, port);
+        if (rxAddr != NULL && rxAddrSz != 0) {
+            memset(rxAddr, 0, rxAddrSz);
+            rxAddr->sin_family = AF_INET;
+            rxAddr->sin_addr.s_addr = inet_addr(rxIp);
+            rxAddr->sin_port = htons(port);
+        }
         else {
             error = 1;
             WCERR("trying to create rx addr without address");
@@ -174,7 +309,7 @@ CreateSockets(
 
         if (!error) {
             if (setsockopt(*rxFd, SOL_SOCKET, SO_REUSEADDR,
-                           &on, (socklen_t)sizeof(on)) != 0) {
+                           &on, (unsigned int)sizeof(on)) != 0) {
                 error = 1;
                 WCERR("couldn't set rx reuse addr");
             }
@@ -182,7 +317,7 @@ CreateSockets(
 #ifdef SO_REUSEPORT
         if (!error) {
             if (setsockopt(*rxFd, SOL_SOCKET, SO_REUSEPORT,
-                           &on, (socklen_t)sizeof(on)) != 0) {
+                           &on, (unsigned int)sizeof(on)) != 0) {
                 error = 1;
                 WCERR("couldn't set rx reuse port");
             }
@@ -220,6 +355,29 @@ CreateSockets(
     return error;
 }
 
+#endif
+
+
+/* Missing items:
+ * inet_addr()
+ * select()
+ * AF_INET
+ * htons()
+ * struct sockaddr_in
+ * socket()
+ * SOCK_DGRAM
+ * setsockopt
+ * SO_REUSEADDR
+ * IPPROTO_IP
+ * IP_MULTICAST_LOOP
+ * bind
+ * IP_ADD_MEMBERSHIP
+ * struct ip_mreq
+ * fcntl()
+ * O_NONBLOCK
+ * struct timeval
+ */
+
 
 static int
 SetFakeKey(WOLFSSL* ssl)
@@ -243,6 +401,20 @@ SetFakeKey(WOLFSSL* ssl)
 }
 
 
+static int seq_cb(word16 peerId, word32 maxSeq, word32 curSeq, void* ctx)
+{
+    char* ctxStr = (char*)ctx;
+
+    WCPRINTF("Highwater Callback (%u:%u/%u): %s\n", peerId, curSeq, maxSeq,
+          ctxStr != NULL ? ctxStr : "Forgot to set the callback context.");
+
+    return 0;
+}
+
+
+#define MSG_SIZE 80
+
+
 #ifndef NO_WOLFCAST_CLIENT
 
 int
@@ -251,21 +423,18 @@ WolfcastClient(
     const unsigned short* peerIdList,
     unsigned int peerIdListSz)
 {
-    int ret, rxfd, txfd, error = 0;
-    struct sockaddr_in receive, transmit;
-    socklen_t receiveSz = sizeof(receive), transmitSz = sizeof(transmit);
+    int ret, error = 0;
     char seqHwCbCtx[] = "Callback context string.";
 #ifdef WOLFSSL_STATIC_MEMORY
     byte memory[80000];
     byte memoryIO[34500];
 #endif
+    SocketInfo_t si;
     WOLFSSL_CTX* ctx;
     WOLFSSL* ssl;
     unsigned int i;
 
-    error = CreateSockets(&txfd, &transmit, transmitSz,
-                          &rxfd, &receive, receiveSz,
-                          GROUP_ADDR, ANYIN_ADDR, GROUP_PORT);
+    error = CreateSockets(&si, 1);
     if (error)
         WCERR("Couldn't create sockets");
 
@@ -303,6 +472,11 @@ WolfcastClient(
     }
 
     if (!error) {
+        if (si.txCb != NULL && si.rxCb != NULL) {
+            wolfSSL_SetIOSend(ctx, si.txCb);
+            wolfSSL_SetIORecv(ctx, si.rxCb);
+        }
+
         ret = wolfSSL_CTX_mcast_set_member_id(ctx, myId);
         if (ret != SSL_SUCCESS) {
             error = 1;
@@ -327,7 +501,11 @@ WolfcastClient(
     }
 
     if (!error) {
-        ret = wolfSSL_set_read_fd(ssl, rxfd);
+        #if 0
+        wolfSSL_SetIOWriteCtx(ssl, NULL);
+        wolfSSL_SetIOReadCtx(ssl, NULL);
+        #endif
+        ret = wolfSSL_set_read_fd(ssl, si.rxFd);
         if (ret != SSL_SUCCESS) {
             error = 1;
             WCERR("set ssl read fd error");
@@ -335,7 +513,7 @@ WolfcastClient(
     }
 
     if (!error) {
-        ret = wolfSSL_set_write_fd(ssl, txfd);
+        ret = wolfSSL_set_write_fd(ssl, si.txFd);
         if (ret != SSL_SUCCESS) {
             error = 1;
             WCERR("set ssl write fd error");
@@ -343,7 +521,7 @@ WolfcastClient(
     }
 
     if (!error) {
-        ret = wolfSSL_dtls_set_peer(ssl, &transmit, transmitSz);
+        ret = wolfSSL_dtls_set_peer(ssl, &si.tx, si.txSz);
         if (ret != SSL_SUCCESS) {
             error = 1;
             WCERR("set ssl sender error");
@@ -381,16 +559,15 @@ WolfcastClient(
         for (;;) {
             char msg[MSG_SIZE];
             fd_set readfds;
-            int ret;
             struct timeval timeout = {0, 500000};
             unsigned short peerId;
 
             FD_ZERO(&readfds);
-            FD_SET(rxfd, &readfds);
-            ret = select(rxfd+1, &readfds, NULL, NULL, &timeout);
+            FD_SET(si.rxFd, &readfds);
+            ret = select(si.rxFd+1, &readfds, NULL, NULL, &timeout);
             if (ret < 0) WCERR("main select failed");
 
-            if (FD_ISSET(rxfd, &readfds)) {
+            if (FD_ISSET(si.rxFd, &readfds)) {
                 ssize_t n = wolfSSL_mcast_read(ssl, &peerId, msg, MSG_SIZE);
                 if (n < 0) {
                     n = wolfSSL_get_error(ssl, n);
@@ -421,10 +598,6 @@ WolfcastClient(
         }
     }
 
-    wolfSSL_free(ssl);
-    wolfSSL_CTX_free(ctx);
-    wolfSSL_Cleanup();
-
     return error;
 }
 
@@ -438,13 +611,12 @@ WolfcastServer(unsigned short myId,
     const unsigned short* ignore1,
     unsigned int ignore2)
 {
-    int txfd, error, ret;
-    struct sockaddr_in transmit;
-    int transmitSz = sizeof(transmit);
+    int error, ret;
 #ifdef WOLFSSL_STATIC_MEMORY
     byte memory[80000];
     byte memoryIO[34500];
 #endif
+    SocketInfo_t si;
     WOLFSSL_CTX* ctx;
     WOLFSSL* ssl;
 
@@ -453,9 +625,7 @@ WolfcastServer(unsigned short myId,
 
     wolfSSL_Init();
 
-    error = CreateSockets(&txfd, &transmit, transmitSz,
-                          NULL, NULL, 0,
-                          GROUP_ADDR, NULL, GROUP_PORT);
+    error = CreateSockets(&si, 0);
     if (error)
         WCERR("Couldn't create sockets");
 
@@ -507,7 +677,11 @@ WolfcastServer(unsigned short myId,
     }
 
     if (!error) {
-        ret = wolfSSL_set_write_fd(ssl, txfd);
+        #if 0
+        wolfSSL_SetIOWriteCtx(ssl, NULL);
+        wolfSSL_SetIOReadCtx(ssl, NULL);
+        #endif
+        ret = wolfSSL_set_write_fd(ssl, si.txFd);
         if (ret != SSL_SUCCESS) {
             error = 1;
             WCERR("set ssl write fd error");
@@ -515,7 +689,7 @@ WolfcastServer(unsigned short myId,
     }
 
     if (!error) {
-        ret = wolfSSL_dtls_set_peer(ssl, &transmit, transmitSz);
+        ret = wolfSSL_dtls_set_peer(ssl, &si.tx, si.txSz);
         if (ret != SSL_SUCCESS) {
             error = 1;
             WCERR("set ssl sender error");
@@ -543,10 +717,6 @@ WolfcastServer(unsigned short myId,
             sleep(1);
         }
     }
-
-    wolfSSL_free(ssl);
-    wolfSSL_CTX_free(ctx);
-    wolfSSL_Cleanup();
 
     return error;
 }
