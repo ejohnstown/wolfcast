@@ -415,6 +415,12 @@ static int seq_cb(word16 peerId, word32 maxSeq, word32 curSeq, void* ctx)
 #define MSG_SIZE 80
 
 
+#ifdef WOLFSSL_STATIC_MEMORY
+    unsigned char memory[80000];
+    unsigned char memoryIO[34500];
+#endif
+
+
 #ifndef NO_WOLFCAST_CLIENT
 
 int
@@ -425,10 +431,6 @@ WolfcastClient(
 {
     int ret, error = 0;
     char seqHwCbCtx[] = "Callback context string.";
-#ifdef WOLFSSL_STATIC_MEMORY
-    byte memory[80000];
-    byte memoryIO[34500];
-#endif
     SocketInfo_t si;
     WOLFSSL_CTX* ctx;
     WOLFSSL* ssl;
@@ -612,10 +614,6 @@ WolfcastServer(unsigned short myId,
     unsigned int ignore2)
 {
     int error, ret;
-#ifdef WOLFSSL_STATIC_MEMORY
-    byte memory[80000];
-    byte memoryIO[34500];
-#endif
     SocketInfo_t si;
     WOLFSSL_CTX* ctx;
     WOLFSSL* ssl;
