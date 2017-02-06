@@ -8,10 +8,17 @@
     } SocketInfo_t;
 #else
     #include "nx_api.h"
+    #ifdef PGB000
+        #include "pgb000_com.h"
+    #else /* PGB002 */
+        #include "pgb002_ap2.h"
+    #endif
+
     typedef struct SocketInfo_t {
-        NX_IP *ip_ptr;
-        NX_UDP_SOCKET *txSocket;
-        NX_UDP_SOCKET *rxSocket;
+        NX_IP *ip;
+        NX_PACKET_POOL *pool;
+        NX_UDP_SOCKET txSocket;
+        NX_UDP_SOCKET rxSocket;
         ULONG ipAddr;
         UINT port;
     } SocketInfo_t;

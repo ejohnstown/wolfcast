@@ -64,8 +64,12 @@ CreateSockets(SocketInfo_t* si, int isClient)
 {
     int error = 0, on = 1, off = 0;
 
-    if (si != NULL) {
+    if (si == NULL) {
+        error = 1;
+        WCERR("no socket info");
+    }
 
+    if (!error) {
         si->tx.sin_family = AF_INET;
         si->tx.sin_addr.s_addr = inet_addr(GROUP_ADDR);
         si->tx.sin_port = htons(GROUP_PORT);
@@ -76,99 +80,95 @@ CreateSockets(SocketInfo_t* si, int isClient)
             error = 1;
             WCERR("unable to create tx socket");
         }
+    }
 
-        if (!error) {
-            if (setsockopt(si->txFd, SOL_SOCKET, SO_REUSEADDR,
-                           &on, sizeof(on)) != 0) {
-                error = 1;
-                WCERR("couldn't set tx reuse addr");
-            }
+    if (!error) {
+        if (setsockopt(si->txFd, SOL_SOCKET, SO_REUSEADDR,
+                       &on, sizeof(on)) != 0) {
+            error = 1;
+            WCERR("couldn't set tx reuse addr");
         }
+    }
 #ifdef SO_REUSEPORT
-        if (!error) {
-            if (setsockopt(si->txFd, SOL_SOCKET, SO_REUSEPORT,
-                           &on, sizeof(on)) != 0) {
-                error = 1;
-                WCERR("couldn't set tx reuse port");
-            }
-        }
-#endif
-        if (!error && isClient) {
-            /* don't send to self */
-            if (setsockopt(si->txFd, IPPROTO_IP, IP_MULTICAST_LOOP,
-                           &off, sizeof(off)) != 0) {
-                error = 1;
-                WCERR("couldn't disable multicast loopback");
-            }
+    if (!error) {
+        if (setsockopt(si->txFd, SOL_SOCKET, SO_REUSEPORT,
+                       &on, sizeof(on)) != 0) {
+            error = 1;
+            WCERR("couldn't set tx reuse port");
         }
     }
-    else {
-        error = 1;
-        WCERR("no socket info");
+#endif
+
+    if (!isClient)
+        return error;
+
+    if (!error) {
+        /* don't send to self */
+        if (setsockopt(si->txFd, IPPROTO_IP, IP_MULTICAST_LOOP,
+                       &off, sizeof(off)) != 0) {
+            error = 1;
+            WCERR("couldn't disable multicast loopback");
+        }
     }
 
-    if (isClient) {
+    if (!error) {
+        si->rxFd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (si->rxFd < 0) {
+            error = 1;
+            WCERR("unable to create rx socket");
+        }
+    }
+
+    if (!error) {
+        if (setsockopt(si->rxFd, SOL_SOCKET, SO_REUSEADDR,
+                       &on, (unsigned int)sizeof(on)) != 0) {
+            error = 1;
+            WCERR("couldn't set rx reuse addr");
+        }
+    }
+#ifdef SO_REUSEPORT
+    if (!error) {
+        if (setsockopt(si->rxFd, SOL_SOCKET, SO_REUSEPORT,
+                       &on, (unsigned int)sizeof(on)) != 0) {
+            error = 1;
+            WCERR("couldn't set rx reuse port");
+        }
+    }
+#endif
+    if (!error) {
         struct sockaddr_in rxAddr;
 
-        if (!error) {
-            memset(&rxAddr, 0, sizeof(rxAddr));
-            rxAddr.sin_family = AF_INET;
-            rxAddr.sin_addr.s_addr = htonl(INADDR_ANY);
-            rxAddr.sin_port = htons(GROUP_PORT);
+        memset(&rxAddr, 0, sizeof(rxAddr));
+        rxAddr.sin_family = AF_INET;
+        rxAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+        rxAddr.sin_port = htons(GROUP_PORT);
+
+        if (bind(si->rxFd,
+                 (struct sockaddr*)&rxAddr, sizeof(rxAddr)) != 0) {
+
+            error = 1;
+            WCERR("rx bind failed");
         }
+    }
 
-        if (!error) {
-            si->rxFd = socket(AF_INET, SOCK_DGRAM, 0);
-            if (si->rxFd < 0) {
-                error = 1;
-                WCERR("unable to create rx socket");
-            }
+    if (!error) {
+        struct ip_mreq imreq;
+        memset(&imreq, 0, sizeof(imreq));
+
+        imreq.imr_multiaddr.s_addr = inet_addr(GROUP_ADDR);
+        imreq.imr_interface.s_addr = htonl(INADDR_ANY);
+
+        if (setsockopt(si->rxFd, IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                       (const void*)&imreq, sizeof(imreq)) != 0) {
+            error = 1;
+            WCERR("setsockopt mc add membership failed");
         }
+    }
 
-        if (!error) {
-            if (setsockopt(si->rxFd, SOL_SOCKET, SO_REUSEADDR,
-                           &on, (unsigned int)sizeof(on)) != 0) {
-                error = 1;
-                WCERR("couldn't set rx reuse addr");
-            }
-        }
-#ifdef SO_REUSEPORT
-        if (!error) {
-            if (setsockopt(si->rxFd, SOL_SOCKET, SO_REUSEPORT,
-                           &on, (unsigned int)sizeof(on)) != 0) {
-                error = 1;
-                WCERR("couldn't set rx reuse port");
-            }
-        }
-#endif
-        if (!error) {
-            if (bind(si->rxFd,
-                     (struct sockaddr*)&rxAddr, sizeof(rxAddr)) != 0) {
-
-                error = 1;
-                WCERR("rx bind failed");
-            }
-        }
-
-        if (!error) {
-            struct ip_mreq imreq;
-            memset(&imreq, 0, sizeof(imreq));
-
-            imreq.imr_multiaddr.s_addr = inet_addr(GROUP_ADDR);
-            imreq.imr_interface.s_addr = htonl(INADDR_ANY);
-
-            if (setsockopt(si->rxFd, IPPROTO_IP, IP_ADD_MEMBERSHIP,
-                           (const void*)&imreq, sizeof(imreq)) != 0) {
-                error = 1;
-                WCERR("setsockopt mc add membership failed");
-            }
-        }
-
-        if (!error) {
-            if (fcntl(si->rxFd, F_SETFL, O_NONBLOCK) == -1) {
-                error = 1;
-                WCERR("set nonblock failed");
-            }
+    if (!error) {
+        if (fcntl(si->rxFd, F_SETFL, O_NONBLOCK) == -1) {
+            error = 1;
+            WCERR("set nonblock failed");
         }
     }
 
@@ -200,7 +200,54 @@ NetxDtlsTxCallback(
     char *buf, int sz,
     void *ctx)
 {
-	return 0;
+    SocketInfo_t* si;
+    NX_PACKET *pkt = NULL;
+    unsigned int ret;
+    int error = 0;
+
+    if (ctx == NULL || buf == NULL) {
+        error = 1;
+        WCERR("transmit callback invalid parameters");
+    }
+
+    if (!error) {
+        si = (SocketInfo_t*)ctx;
+
+        ret = nx_packet_allocate(si->pool, &pkt, NX_UDP_PACKET, NX_NO_WAIT);
+        if (ret != NX_SUCCESS) {
+            error = 1;
+            WCERR("couldn't allocate packet wrapper");
+        }
+    }
+
+    if (!error) {
+        ret = nx_packet_data_append(pkt, buf, sz, si->pool, NX_NO_WAIT);
+        if (ret != NX_SUCCESS) {
+            error = 1;
+            WCERR("couldn't append data to packet");
+        }
+    }
+
+    if (!error) {
+        ret = nx_udp_socket_send(si->txSocket, pkt,
+                                 si->ipAddr, si->port);
+        if (ret != NX_SUCCESS) {
+            error = 1;
+            WCERR("tx error");
+        }
+    }
+
+    if (error) {
+        sz = WOLFSSL_CBIO_ERR_GENERAL;
+
+        /* In case of error, release packet. */
+        ret = nx_packet_release(pkt);
+        if (ret != NX_SUCCESS) {
+            WCERR("couldn't release packet");
+        }
+    }
+
+    return sz;
 }
 
 
@@ -210,7 +257,18 @@ NetxDtlsRxCallback(
     char *buf, int sz,
     void *ctx)
 {
-	return 0;
+    SocketInfo_t* si;
+    int ret;
+
+    if (ctx == NULL || buf == NULL) {
+        error = 1;
+    }
+
+    if (!error) {
+        si = (SocketInfo_t*)ctx;
+    }
+
+    return 0;
 }
 
 
@@ -218,112 +276,95 @@ static int
 CreateSockets(SocketInfo_t* si, int isClient)
 {
     int error = 0, on = 1, off = 0;
+    unsigned int ret;
 
-    if (si != NULL) {
+    if (si == NULL) {
+        error = 1;
+        WCERR("no socket info");
+    }
 
-        txAddr->sin_family = AF_INET;
-        txAddr->sin_addr.s_addr = GROUP_ADDR;
-        txAddr->sin_port = GROUP_PORT;
+    if (!error) {
+#ifdef PGB000
+        si->ip = bsp_ip_system_bus;
+        si->pool = bsp_pool_system_bus;
+#else /* PGB002 */
+        si->ip = bsp_ip_local_bus;
+        si->pool = bsp_pool_local_bus;
+#endif
 
-        *txFd = socket(AF_INET, SOCK_DGRAM, 0);
-        if (*txFd < 0) {
+        ret = nx_udp_enable(si->ip);
+        if (ret == NX_ALREADY_ENABLED) {
+            WCERR("UDP already enabled");
+        }
+        else if (ret != NX_SUCCESS) {
+            error = 1;
+            WCERR("cannot enable UDP");
+            WCPRINTF("cannot enable UDP ret = %u\n", ret);
+        }
+    }
+    if (!error) {
+        ret = nx_igmp_enable(si->ip);
+
+        if (ret == NX_ALREADY_ENABLED) {
+            WCERR("IGMP already enabled");
+        }
+        else if (ret != NX_SUCCESS) {
+            error = 1;
+            WCERR("cannot enable IGMP");
+            WCPRINTF("cannot enable IGMP ret = %u\n", ret);
+        }
+    }
+
+    if (!error) {
+        si->ipAddr = GROUP_ADDR;
+        si->port = GROUP_PORT;
+
+        ret = nx_udp_socket_create(si->ip, &si->txSocket,
+                                   "Multicast TX Socket",
+                                   NX_IP_NORMAL, NX_DONT_FRAGMENT,
+                                   NX_IP_TIME_TO_LIVE, 30);
+        if (ret != NX_SUCCESS) {
             error = 1;
             WCERR("unable to create tx socket");
         }
-
-        if (!error) {
-            if (setsockopt(*txFd, SOL_SOCKET, SO_REUSEADDR,
-                           &on, (unsigned int)sizeof(on)) != 0) {
-                error = 1;
-                WCERR("couldn't set tx reuse addr");
-            }
-        }
-
-        if (!error) {
-            if (setsockopt(*txFd, SOL_SOCKET, SO_REUSEPORT,
-                           &on, (unsigned int)sizeof(on)) != 0) {
-                error = 1;
-                WCERR("couldn't set tx reuse port");
-            }
-        }
-
-        if (!error && rxFd != NULL) {
-            /* don't send to self */
-            if (setsockopt(*txFd, IPPROTO_IP, IP_MULTICAST_LOOP,
-                           &off, sizeof(off)) != 0) {
-                error = 1;
-                WCERR("couldn't disable multicast loopback");
-            }
-        }
-    }
-    else {
-        error = 1;
-		WCERR("no socket info");
     }
 
-    if (!error && rxFd != NULL && rxIp != NULL) {
+    if (!isClient)
+        return error;
 
-        if (rxAddr != NULL && rxAddrSz != 0) {
-            memset(rxAddr, 0, rxAddrSz);
-            rxAddr->sin_family = AF_INET;
-            rxAddr->sin_addr.s_addr = inet_addr(rxIp);
-            rxAddr->sin_port = htons(port);
-        }
-        else {
+    if (!error) {
+        ret = nx_igmp_loopback_disable(si->ip);
+        
+        if (ret != NX_SUCCESS) {
             error = 1;
-            WCERR("trying to create rx addr without address");
+            WCERR("couldn't disable multicast loopback");
         }
+    }
 
-        if (!error) {
-            *rxFd = socket(AF_INET, SOCK_DGRAM, 0);
-            if (*rxFd < 0) {
-                error = 1;
-                WCERR("unable to create rx socket");
-            }
+    if (!error) {
+        ret = nx_udp_socket_create(si->ip, &si->rxSocket,
+                                   "Multicast RX Socket",
+                                   NX_IP_NORMAL, NX_DONT_FRAGMENT,
+                                   NX_IP_TIME_TO_LIVE, 30);
+        if (ret != NX_SUCCESS) {
+            error = 1;
+            WCERR("unable to create rx socket");
         }
+    }
 
-        if (!error) {
-            if (setsockopt(*rxFd, SOL_SOCKET, SO_REUSEADDR,
-                           &on, (unsigned int)sizeof(on)) != 0) {
-                error = 1;
-                WCERR("couldn't set rx reuse addr");
-            }
+    if (!error) {
+        ret = nx_udp_socket_bind(&si->rxSocket, GROUP_PORT, NX_NO_WAIT);
+        if (ret != NX_SUCCESS) {
+            error = 1;
+            WCERR("rx bind failed");
         }
-#ifdef SO_REUSEPORT
-        if (!error) {
-            if (setsockopt(*rxFd, SOL_SOCKET, SO_REUSEPORT,
-                           &on, (unsigned int)sizeof(on)) != 0) {
-                error = 1;
-                WCERR("couldn't set rx reuse port");
-            }
-        }
-#endif
-        if (!error) {
-            if (bind(*rxFd, (struct sockaddr*)rxAddr, rxAddrSz) != 0) {
-                error = 1;
-                WCERR("rx bind failed");
-            }
-        }
+    }
 
-        if (!error) {
-            struct ip_mreq imreq;
-            memset(&imreq, 0, sizeof(imreq));
-
-            imreq.imr_multiaddr.s_addr = inet_addr(txIp);
-            imreq.imr_interface.s_addr = inet_addr(rxIp);
-
-            if (setsockopt(*rxFd, IPPROTO_IP, IP_ADD_MEMBERSHIP,
-                           (const void*)&imreq, sizeof(imreq)) != 0) {
-                error = 1;
-                WCERR("setsockopt mc add membership failed");
-            }
-        }
-
-        if (!error) {
-            if (fcntl(*rxFd, F_SETFL, O_NONBLOCK) == -1) {
-                error = 1;
-                WCERR("set nonblock failed");
-            }
+    if (!error) {
+        ret = nx_igmp_multicast_interface_join(si->ip, GROUP_ADDR, 1);
+        if (ret != NX_SUCCESS) {
+            error = 1;
+            WCERR("setsockopt mc add membership failed");
         }
     }
 
@@ -374,11 +415,6 @@ static int seq_cb(word16 peerId, word32 maxSeq, word32 curSeq, void* ctx)
 #ifdef WOLFSSL_STATIC_MEMORY
     unsigned char memory[80000];
     unsigned char memoryIO[34500];
-#endif
-
-
-#ifdef NETX
-    /* callback functions. */
 #endif
 
 
