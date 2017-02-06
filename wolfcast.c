@@ -205,6 +205,7 @@ NetxDtlsTxCallback(
     unsigned int ret;
     int error = 0;
 
+    (void)ssl;
     if (ctx == NULL || buf == NULL) {
         error = 1;
         WCERR("transmit callback invalid parameters");
@@ -229,7 +230,7 @@ NetxDtlsTxCallback(
     }
 
     if (!error) {
-        ret = nx_udp_socket_send(si->txSocket, pkt,
+        ret = nx_udp_socket_send(&si->txSocket, pkt,
                                  si->ipAddr, si->port);
         if (ret != NX_SUCCESS) {
             error = 1;
@@ -258,8 +259,10 @@ NetxDtlsRxCallback(
     void *ctx)
 {
     SocketInfo_t* si;
-    int ret;
+    unsigned int ret;
+    int error = 0;
 
+    (void)ssl;
     if (ctx == NULL || buf == NULL) {
         error = 1;
     }
@@ -275,7 +278,7 @@ NetxDtlsRxCallback(
 static int
 CreateSockets(SocketInfo_t* si, int isClient)
 {
-    int error = 0, on = 1, off = 0;
+    int error = 0;
     unsigned int ret;
 
     if (si == NULL) {
@@ -285,11 +288,11 @@ CreateSockets(SocketInfo_t* si, int isClient)
 
     if (!error) {
 #ifdef PGB000
-        si->ip = bsp_ip_system_bus;
-        si->pool = bsp_pool_system_bus;
+        si->ip = &bsp_ip_system_bus;
+        si->pool = &bsp_pool_system_bus;
 #else /* PGB002 */
-        si->ip = bsp_ip_local_bus;
-        si->pool = bsp_pool_local_bus;
+        si->ip = &bsp_ip_local_bus;
+        si->pool = &bsp_pool_local_bus;
 #endif
 
         ret = nx_udp_enable(si->ip);
@@ -413,8 +416,13 @@ static int seq_cb(word16 peerId, word32 maxSeq, word32 curSeq, void* ctx)
 
 
 #ifdef WOLFSSL_STATIC_MEMORY
-    unsigned char memory[80000];
-    unsigned char memoryIO[34500];
+    #if defined(NETX) && defined(PGB002)
+        #define MEMORY_SECTION LINK_SECTION(data_sdram)
+    #else
+        #define MEMORY_SECTION
+    #endif
+    MEMORY_SECTION unsigned char memory[80000];
+    MEMORY_SECTION unsigned char memoryIO[34500];
 #endif
 
 
@@ -579,7 +587,7 @@ WolfcastInit(
         }
 
         if (!error) {
-            int i;
+            unsigned int i;
             for (i = 0; i < peerIdListSz; i++) {
                 ret = wolfSSL_mcast_peer_add(*ssl, peerIdList[i], 0);
                 if (ret != SSL_SUCCESS) {
@@ -643,7 +651,7 @@ WolfcastClient(WOLFSSL *ssl, unsigned short myId,
             }
         }
         else
-            printf("got msg from peer %u %s\n", peerId, msg);
+            WCPRINTF("got msg from peer %u %s\n", peerId, msg);
     }
 
     if (!error) {

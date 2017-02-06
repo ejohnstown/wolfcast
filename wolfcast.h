@@ -1,3 +1,6 @@
+#include <wolfssl/options.h>
+#include <wolfssl/ssl.h>
+
 #ifndef NETX
     #include <arpa/inet.h>
     typedef struct SocketInfo_t {
