@@ -260,7 +260,7 @@ NetxDtlsRxCallback(
 {
     SocketInfo_t *si;
     NX_PACKET *pkt = NULL;
-    unsigned int rxSz;
+    unsigned long rxSz;
     unsigned int ret;
     int error = 0;
 
@@ -281,14 +281,14 @@ NetxDtlsRxCallback(
     }
 
     if (!error) {
-        ret = nx_packet_length_get(pkt, *rxSz);
+        ret = nx_packet_length_get(pkt, &rxSz);
         if (ret != NX_SUCCESS) {
             error = 1;
             WCERR("couldn't get packet length");
         }
     }
 
-    if (rxSz > sz) {
+    if (rxSz > (unsigned long)sz) {
         error = 1;
         WCERR("receive packet too large for buffer");
     }
