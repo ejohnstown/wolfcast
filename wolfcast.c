@@ -258,20 +258,67 @@ NetxDtlsRxCallback(
     char *buf, int sz,
     void *ctx)
 {
-    SocketInfo_t* si;
+    SocketInfo_t *si;
+    NX_PACKET *pkt = NULL;
+    unsigned int rxSz;
     unsigned int ret;
     int error = 0;
 
     (void)ssl;
-    if (ctx == NULL || buf == NULL) {
+    if (ctx == NULL || buf == NULL || sz <= 0) {
         error = 1;
+        WCERR("receive callback invalid parameters");
     }
 
     if (!error) {
         si = (SocketInfo_t*)ctx;
+
+        ret = nx_udp_socket_receive(&si->rxSocket, &pkt, NX_NO_WAIT);
+        if (ret != NX_SUCCESS) {
+            error = 1;
+            WCERR("rx error");
+        }
     }
 
-    return 0;
+    if (!error) {
+        ret = nx_packet_length_get(pkt, *rxSz);
+        if (ret != NX_SUCCESS) {
+            error = 1;
+            WCERR("couldn't get packet length");
+        }
+    }
+
+    if (rxSz > sz) {
+        error = 1;
+        WCERR("receive packet too large for buffer");
+    }
+
+    if (!error) {
+        ret = nx_packet_data_retrieve(pkt, buf, &rxSz);
+        if (ret != NX_SUCCESS) {
+            error = 1;
+            WCERR("couldn't retrieve packet");
+        }
+    }
+
+    if (pkt != NULL) {
+        ret = nx_packet_release(pkt);
+        if (ret != NX_SUCCESS) {
+            error = 1;
+            WCERR("couldn't release packet");
+        }
+    }
+
+    if (!error)
+        sz = (int)rxSz;
+    else {
+        if (ret == NX_NO_PACKET)
+            sz = WOLFSSL_CBIO_ERR_WANT_READ;
+        else
+            sz = WOLFSSL_CBIO_ERR_GENERAL;
+    }
+
+    return sz;
 }
 
 
