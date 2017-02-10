@@ -11,7 +11,7 @@
  then run  ./wolfcast client on host 1 (will see server time msgs)
  then      ./wolfcast client on host 2 (will see server and client 1msgs, and
                                          host1 will see host2 msgs as well)
- 
+
  $ ./wolfcast client <myId> <peerIdList>
  $ ./wolfcast server <myId>
 
@@ -260,7 +260,7 @@ NetxDtlsRxCallback(
 {
     SocketInfo_t *si;
     NX_PACKET *pkt = NULL;
-    unsigned long rxSz;
+    unsigned long rxSz = 0;
     unsigned int ret;
     int error = 0;
 
@@ -274,10 +274,8 @@ NetxDtlsRxCallback(
         si = (SocketInfo_t*)ctx;
 
         ret = nx_udp_socket_receive(&si->rxSocket, &pkt, NX_NO_WAIT);
-        if (ret != NX_SUCCESS) {
+        if (ret != NX_SUCCESS)
             error = 1;
-            WCERR("rx error");
-        }
     }
 
     if (!error) {
@@ -288,9 +286,11 @@ NetxDtlsRxCallback(
         }
     }
 
-    if (rxSz > (unsigned long)sz) {
-        error = 1;
-        WCERR("receive packet too large for buffer");
+    if (!error) {
+        if (rxSz > (unsigned long)sz) {
+            error = 1;
+            WCERR("receive packet too large for buffer");
+        }
     }
 
     if (!error) {
@@ -314,8 +314,10 @@ NetxDtlsRxCallback(
     else {
         if (ret == NX_NO_PACKET)
             sz = WOLFSSL_CBIO_ERR_WANT_READ;
-        else
+        else {
             sz = WOLFSSL_CBIO_ERR_GENERAL;
+            WCERR("rx error");
+        }
     }
 
     return sz;
@@ -334,6 +336,8 @@ CreateSockets(SocketInfo_t* si, int isClient)
     }
 
     if (!error) {
+        si->ipAddr = GROUP_ADDR;
+        si->port = GROUP_PORT;
 #ifdef PGB000
         si->ip = &bsp_ip_system_bus;
         si->pool = &bsp_pool_system_bus;
@@ -341,10 +345,9 @@ CreateSockets(SocketInfo_t* si, int isClient)
         si->ip = &bsp_ip_local_bus;
         si->pool = &bsp_pool_local_bus;
 #endif
-
         ret = nx_udp_enable(si->ip);
         if (ret == NX_ALREADY_ENABLED) {
-            WCERR("UDP already enabled");
+            WCPRINTF("UDP already enabled\n");
         }
         else if (ret != NX_SUCCESS) {
             error = 1;
@@ -352,23 +355,20 @@ CreateSockets(SocketInfo_t* si, int isClient)
             WCPRINTF("cannot enable UDP ret = %u\n", ret);
         }
     }
+
     if (!error) {
         ret = nx_igmp_enable(si->ip);
 
         if (ret == NX_ALREADY_ENABLED) {
-            WCERR("IGMP already enabled");
+            WCPRINTF("IGMP already enabled\n");
         }
         else if (ret != NX_SUCCESS) {
             error = 1;
             WCERR("cannot enable IGMP");
-            WCPRINTF("cannot enable IGMP ret = %u\n", ret);
         }
     }
 
     if (!error) {
-        si->ipAddr = GROUP_ADDR;
-        si->port = GROUP_PORT;
-
         ret = nx_udp_socket_create(si->ip, &si->txSocket,
                                    "Multicast TX Socket",
                                    NX_IP_NORMAL, NX_DONT_FRAGMENT,
@@ -379,12 +379,20 @@ CreateSockets(SocketInfo_t* si, int isClient)
         }
     }
 
+    if (!error) {
+        ret = nx_udp_socket_bind(&si->txSocket, NX_ANY_PORT, NX_NO_WAIT);
+        if (ret != NX_SUCCESS) {
+            error = 1;
+            WCERR("tx bind failed");
+        }
+    }
+
     if (!isClient)
         return error;
 
     if (!error) {
         ret = nx_igmp_loopback_disable(si->ip);
-        
+
         if (ret != NX_SUCCESS) {
             error = 1;
             WCERR("couldn't disable multicast loopback");
@@ -411,7 +419,7 @@ CreateSockets(SocketInfo_t* si, int isClient)
     }
 
     if (!error) {
-        ret = nx_igmp_multicast_interface_join(si->ip, GROUP_ADDR, 1);
+        ret = nx_igmp_multicast_join(si->ip, GROUP_ADDR);
         if (ret != NX_SUCCESS) {
             error = 1;
             WCERR("setsockopt mc add membership failed");
@@ -427,20 +435,22 @@ CreateSockets(SocketInfo_t* si, int isClient)
 static int
 SetFakeKey(WOLFSSL* ssl)
 {
-    unsigned char pms[512];
+    unsigned char pms[64];
     unsigned char cr[32];
     unsigned char sr[32];
     const unsigned char suite[2] = {0, 0xFE};  /* WDM_WITH_NULL_SHA256 */
-    int error;
+    int ret, error;
 
     memset(pms, 0x23, sizeof(pms));
     memset(cr, 0xA5, sizeof(cr));
     memset(sr, 0x5A, sizeof(sr));
 
-    error = SSL_SUCCESS != wolfSSL_set_secret(ssl, 1, pms, sizeof(pms),
-                                              cr, sr, suite);
-    if (error)
+    ret = wolfSSL_set_secret(ssl, 1, pms, sizeof(pms),
+                    cr, sr, suite);
+    if (ret != SSL_SUCCESS) {
+        error = 1;
         WCERR("cannot set ssl secret error");
+    }
 
     return error;
 }
@@ -530,16 +540,14 @@ WolfcastInit(
         wolfSSL_method_func method = NULL;
         *ctx = NULL;
 
-        if (isClient) {
+        if (isClient)
             method = wolfDTLSv1_2_client_method_ex;
-        }
-        else {
+        else
             method = wolfDTLSv1_2_server_method_ex;
-        }
 
         if (method != NULL) {
             ret = wolfSSL_CTX_load_static_memory(
-                    ctx, wolfDTLSv1_2_server_method_ex,
+                    ctx, method,
                     memory, sizeof(memory), 0, 1);
 
             if (ret != SSL_SUCCESS) {
@@ -618,8 +626,8 @@ WolfcastInit(
     }
 #else
     if (!error) {
-        wolfSSL_SetIOWriteCtx(*ssl, &si);
-        wolfSSL_SetIOReadCtx(*ssl, &si);
+        wolfSSL_SetIOWriteCtx(*ssl, si);
+        wolfSSL_SetIOReadCtx(*ssl, si);
     }
 #endif
 
@@ -675,6 +683,7 @@ WolfcastClientInit(unsigned int *txtime, unsigned int *count)
     return error;
 }
 
+
 int
 WolfcastClient(WOLFSSL *ssl, unsigned short myId,
                unsigned int *txtime, unsigned int *count)
@@ -710,7 +719,7 @@ WolfcastClient(WOLFSSL *ssl, unsigned short myId,
             int n;
 
             sprintf(msg, "%u sending message %d", myId, *count++);
-            msg_len= strlen(msg) + 1;
+            msg_len = strlen(msg) + 1;
             n = wolfSSL_write(ssl, msg, (unsigned int)msg_len);
             if (n < 0) {
                 error = 1;
@@ -811,7 +820,7 @@ main(
         if (!error && isClient) {
             char *str = argv[3];
             char *endptr = argv[3];
-            
+
             do {
                 if (peerIdListSz == PEER_ID_LIST_SZ) {
                     error = 1;
@@ -842,7 +851,6 @@ main(
                  "       wolfcast server <id>\n");
     }
 
-    
     if (!error)
         error = WolfcastInit(isClient, myId,
                              peerIdList, peerIdListSz,
