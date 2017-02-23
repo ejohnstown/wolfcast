@@ -439,7 +439,7 @@ SetFakeKey(WOLFSSL* ssl)
     unsigned char cr[32];
     unsigned char sr[32];
     const unsigned char suite[2] = {0, 0xFE};  /* WDM_WITH_NULL_SHA256 */
-    int ret, error;
+    int ret, error = 0;
 
     memset(pms, 0x23, sizeof(pms));
     memset(cr, 0xA5, sizeof(cr));
