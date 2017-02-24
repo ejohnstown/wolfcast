@@ -99,6 +99,19 @@ CreateSockets(SocketInfo_t* si, int isClient)
     }
 #endif
 
+    if (!error) {
+        struct in_addr addr;
+
+        memset(&addr, 0, sizeof(addr));
+        addr.s_addr = inet_addr("192.168.2.1");
+
+        if (setsockopt(si->txFd, IPPROTO_IP, IP_MULTICAST_IF,
+                    (const void*)&addr, sizeof(addr)) != 0) {
+            error = 1;
+            WCERR("setsockopt mc set multicast interface failed");
+        }
+    }
+
     if (!isClient)
         return error;
 
@@ -156,7 +169,7 @@ CreateSockets(SocketInfo_t* si, int isClient)
         memset(&imreq, 0, sizeof(imreq));
 
         imreq.imr_multiaddr.s_addr = inet_addr(GROUP_ADDR);
-        imreq.imr_interface.s_addr = htonl(INADDR_ANY);
+        imreq.imr_interface.s_addr = inet_addr("192.168.2.1");
 
         if (setsockopt(si->rxFd, IPPROTO_IP, IP_ADD_MEMBERSHIP,
                        (const void*)&imreq, sizeof(imreq)) != 0) {
