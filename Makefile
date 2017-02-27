@@ -1,9 +1,16 @@
+LDFLAGS=-lwolfssl
+
 all: wolfcast
 
-wolfcast: wolfcast.c wolfcast.h
-	gcc -Wall wolfcast.c -o ./wolfcast -lwolfssl
+key-socket.o: key-socket.c key-socket.h
+
+key-services.o: key-services.c key-services.h key-socket.h
+
+wolfcast.o: wolfcast.c wolfcast.h
+
+wolfcast: wolfcast.o key-socket.o key-services.o
 
 clean:
-	rm -rf wolfcast
+	rm -rf *.o wolfcast
 
 .PHONY: clean all
