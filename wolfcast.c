@@ -731,7 +731,7 @@ WolfcastClient(WOLFSSL *ssl, unsigned short myId,
             size_t msg_len;
             int n;
 
-            sprintf(msg, "%u sending message %d", myId, *count++);
+            sprintf(msg, "%u sending message %d", myId, (*count)++);
             msg_len = strlen(msg) + 1;
             n = wolfSSL_write(ssl, msg, (unsigned int)msg_len);
             if (n < 0) {
