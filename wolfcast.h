@@ -27,7 +27,7 @@
     } SocketInfo_t;
 #endif
 
-int WolfcastInit(int, unsigned short, unsigned short *, unsigned int,
+int WolfcastInit(int, unsigned short, const unsigned short *, unsigned int,
                  WOLFSSL_CTX **, WOLFSSL **, SocketInfo_t *);
 int WolfcastClientInit(unsigned int *, unsigned int *);
 int WolfcastClient(WOLFSSL *, unsigned short, unsigned int *, unsigned int *);

@@ -23,6 +23,7 @@
 #include <wolfssl/error-ssl.h>
 #include <wolfssl/wolfcrypt/memory.h>
 #include "wolfcast.h"
+#include "key-services.h"
 
 
 #ifndef NETX
@@ -99,6 +100,7 @@ CreateSockets(SocketInfo_t* si, int isClient)
     }
 #endif
 
+    /* Non-generic solution to a local problem. */
     if (!error) {
         struct in_addr addr;
 
@@ -169,7 +171,12 @@ CreateSockets(SocketInfo_t* si, int isClient)
         memset(&imreq, 0, sizeof(imreq));
 
         imreq.imr_multiaddr.s_addr = inet_addr(GROUP_ADDR);
+#if 0
+        /* Non-generic solution to a local problem. */
+        imreq.imr_interface.s_addr = htonl(INADDR_ANY);
+#else
         imreq.imr_interface.s_addr = inet_addr("192.168.2.1");
+#endif
 
         if (setsockopt(si->rxFd, IPPROTO_IP, IP_ADD_MEMBERSHIP,
                        (const void*)&imreq, sizeof(imreq)) != 0) {
@@ -206,6 +213,9 @@ CreateSockets(SocketInfo_t* si, int isClient)
     #define GROUP_ADDR 0xE2000003
     #define GROUP_PORT 12345
 
+    static struct in_addr keySrvAddr = { IP_ADDRESS(192,168,2,1) };
+    static int hasKey = 0;
+
 
 static int
 NetxDtlsTxCallback(
@@ -227,7 +237,7 @@ NetxDtlsTxCallback(
     if (!error) {
         si = (SocketInfo_t*)ctx;
 
-        ret = nx_packet_allocate(si->pool, &pkt, NX_UDP_PACKET, NX_NO_WAIT);
+        ret = nx_packet_allocate(si->pool, &pkt, NX_UDP_PACKET, NX_WAIT_FOREVER);
         if (ret != NX_SUCCESS) {
             error = 1;
             WCERR("couldn't allocate packet wrapper");
@@ -235,7 +245,7 @@ NetxDtlsTxCallback(
     }
 
     if (!error) {
-        ret = nx_packet_data_append(pkt, buf, sz, si->pool, NX_NO_WAIT);
+        ret = nx_packet_data_append(pkt, buf, sz, si->pool, NX_WAIT_FOREVER);
         if (ret != NX_SUCCESS) {
             error = 1;
             WCERR("couldn't append data to packet");
@@ -445,30 +455,6 @@ CreateSockets(SocketInfo_t* si, int isClient)
 #endif
 
 
-static int
-SetFakeKey(WOLFSSL* ssl)
-{
-    unsigned char pms[64];
-    unsigned char cr[32];
-    unsigned char sr[32];
-    const unsigned char suite[2] = {0, 0xFE};  /* WDM_WITH_NULL_SHA256 */
-    int ret, error = 0;
-
-    memset(pms, 0x23, sizeof(pms));
-    memset(cr, 0xA5, sizeof(cr));
-    memset(sr, 0x5A, sizeof(sr));
-
-    ret = wolfSSL_set_secret(ssl, 1, pms, sizeof(pms),
-                    cr, sr, suite);
-    if (ret != SSL_SUCCESS) {
-        error = 1;
-        WCERR("cannot set ssl secret error");
-    }
-
-    return error;
-}
-
-
 const char seqHwCbCtx[] = "Callback context string.";
 
 static int seq_cb(word16 peerId, word32 maxSeq, word32 curSeq, void* ctx)
@@ -500,7 +486,7 @@ int
 WolfcastInit(
         int isClient,
         unsigned short myId,
-        unsigned short *peerIdList,
+        const unsigned short *peerIdList,
         unsigned int peerIdListSz,
         WOLFSSL_CTX **ctx,
         WOLFSSL **ssl,
@@ -513,6 +499,14 @@ WolfcastInit(
 
         error = 1;
         WCERR("CreateSessions invalid parameters");
+    }
+
+    if (!error) {
+        ret = KeySocket_Init();
+        if (ret != 0) {
+            error = 1;
+            WCERR("Couldn't initialize key service sockets");
+        }
     }
 
     if (!error) {
@@ -667,9 +661,6 @@ WolfcastInit(
         }
     }
 
-    if (!error)
-        error = SetFakeKey(*ssl);
-
     return error;
 }
 
@@ -688,7 +679,7 @@ WolfcastClientInit(unsigned int *txtime, unsigned int *count)
 {
     int error = 0;
     if (txtime != NULL && count != NULL) {
-        *txtime = WolfcastClientUpdateTimeout(WCTIME());
+        *txtime = WCTIME();
         *count = 0;
     }
     else
@@ -707,6 +698,38 @@ WolfcastClient(WOLFSSL *ssl, unsigned short myId,
     if (ssl == NULL || txtime == NULL || count == NULL) {
         error = 1;
         WCERR("WolfcastClient bad parameters");
+    }
+
+    if (!hasKey) {
+        KeyRespPacket_t keyResp;
+        int result;
+        const byte suite[] = { 0x00, 0xFE };
+
+        result = KeyClient_GetKey(&keySrvAddr, &keyResp, NULL); /* XXX NULL should be a heap of some kind? */
+        if (result != 0) {
+            error = 1;
+            WCERR("Key retrieval failed");
+        }
+
+        if (!error) {
+            /* XXX KeyService is missing the suite and the epoch */
+            result = wolfSSL_set_secret(ssl, 1,
+                            keyResp.pms, sizeof(keyResp.pms),
+                            keyResp.clientRandom, keyResp.serverRandom,
+                            suite);
+            if (result != SSL_SUCCESS) {
+                error = 1;
+                WCERR("Couldn't set the session secret");
+            }
+            else {
+                hasKey = 1;
+                WCPRINTF("Key has been set.\n");
+            }
+        }
+
+        memset(&keyResp, 0, sizeof(keyResp));
+
+        return error;
     }
 
     if (!error) {
@@ -728,12 +751,12 @@ WolfcastClient(WOLFSSL *ssl, unsigned short myId,
 
         rxtime = WCTIME();
         if (rxtime >= *txtime) {
-            size_t msg_len;
+            int msg_len;
             int n;
 
             sprintf(msg, "%u sending message %d", myId, (*count)++);
-            msg_len = strlen(msg) + 1;
-            n = wolfSSL_write(ssl, msg, (unsigned int)msg_len);
+            msg_len = (int)strlen(msg) + 1;
+            n = wolfSSL_write(ssl, msg, msg_len);
             if (n < 0) {
                 error = 1;
                 n = wolfSSL_get_error(ssl, n);
