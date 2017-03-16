@@ -58,6 +58,11 @@
 
     #define GROUP_ADDR "226.0.0.3"
     #define GROUP_PORT 12345
+    #define KEY_ADDR "192.168.2.1"
+
+
+    static struct in_addr keySrvAddr;
+    static int hasKey = 0;
 
 
 static int
@@ -69,6 +74,9 @@ CreateSockets(SocketInfo_t* si, int isClient)
         error = 1;
         WCERR("no socket info");
     }
+
+    memset(&keySrvAddr, 0, sizeof(keySrvAddr));
+    keySrvAddr.s_addr = inet_addr(KEY_ADDR);
 
     if (!error) {
         si->tx.sin_family = AF_INET;
@@ -700,38 +708,6 @@ WolfcastClient(WOLFSSL *ssl, unsigned short myId,
         WCERR("WolfcastClient bad parameters");
     }
 
-    if (!hasKey) {
-        KeyRespPacket_t keyResp;
-        int result;
-        const byte suite[] = { 0x00, 0xFE };
-
-        result = KeyClient_GetKey(&keySrvAddr, &keyResp, NULL); /* XXX NULL should be a heap of some kind? */
-        if (result != 0) {
-            error = 1;
-            WCERR("Key retrieval failed");
-        }
-
-        if (!error) {
-            /* XXX KeyService is missing the suite and the epoch */
-            result = wolfSSL_set_secret(ssl, 1,
-                            keyResp.pms, sizeof(keyResp.pms),
-                            keyResp.clientRandom, keyResp.serverRandom,
-                            suite);
-            if (result != SSL_SUCCESS) {
-                error = 1;
-                WCERR("Couldn't set the session secret");
-            }
-            else {
-                hasKey = 1;
-                WCPRINTF("Key has been set.\n");
-            }
-        }
-
-        memset(&keyResp, 0, sizeof(keyResp));
-
-        return error;
-    }
-
     if (!error) {
         unsigned short peerId;
         ssize_t n = wolfSSL_mcast_read(ssl, &peerId, msg, MSG_SIZE);
@@ -891,6 +867,35 @@ main(
         error = WolfcastInit(isClient, myId,
                              peerIdList, peerIdListSz,
                              &ctx, &ssl, &si);
+
+    if (!hasKey) {
+        KeyRespPacket_t keyResp;
+        int result;
+
+        result = KeyClient_GetKey(&keySrvAddr, &keyResp, NULL);
+        if (result != 0) {
+            error = 1;
+            WCERR("Key retrieval failed");
+        }
+
+        if (!error) {
+            result = wolfSSL_set_secret(ssl,
+                            (keyResp.epoch[0] << 8) | keyResp.epoch[1],
+                            keyResp.pms, sizeof(keyResp.pms),
+                            keyResp.clientRandom, keyResp.serverRandom,
+                            keyResp.suite);
+            if (result != SSL_SUCCESS) {
+                error = 1;
+                WCERR("Couldn't set the session secret");
+            }
+            else {
+                hasKey = 1;
+                WCPRINTF("Key has been set.\n");
+            }
+        }
+
+        memset(&keyResp, 0, sizeof(keyResp));
+    }
 
     if (isClient) {
 #ifndef NO_WOLFCAST_CLIENT
